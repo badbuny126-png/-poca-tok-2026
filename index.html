@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, user-scalable=no">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="SUN-STONE LEAGUE">
+  <title>SUN-STONE LEAGUE</title>
+  <link rel="stylesheet" href="/src/styles/main.css">
+</head>
+<body>
+  <div id="app">
+    <canvas id="game-canvas"></canvas>
+    <div id="webgl-error" style="display: none; position: absolute; top: 0; left: 0; width: 100%; height: 100%; background: #1a1a1a; color: #fff; align-items: center; justify-content: center; font-family: sans-serif; text-align: center; padding: 20px; box-sizing: border-box;">
+      <div>
+        <h1>WebGL Unavailable</h1>
+        <p>WebGL is not supported on this device or browser.</p>
+        <p>Please use a modern browser with WebGL support.</p>
+      </div>
+    </div>
+  </div>
+  <script type="module" src="/src/main.js"></script>
+</body>
+</html>
