@@ -2,6 +2,7 @@ import { defineConfig } from 'vite';
 import basicSsl from '@vitejs/plugin-basic-ssl';
 
 export default defineConfig({
+  base: './',
   server: {
     host: '0.0.0.0',
     port: 5173,
@@ -9,10 +10,7 @@ export default defineConfig({
   plugins: [basicSsl()],
   build: {
     target: 'es2020',
-    minify: 'terser',
+    minify: 'esbuild',
     sourcemap: false,
-  },
-  resolve: {
-    alias: {},
   },
 });

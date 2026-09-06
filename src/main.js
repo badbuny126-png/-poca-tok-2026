@@ -1,29 +1,20 @@
 import * as THREE from 'three';
-import { createCourt, addLighting, COURT_WIDTH, COURT_LENGTH, RING_HEIGHT, RING_RADIUS } from './court.js';
+import { createCourt, addLighting, COURT_WIDTH, COURT_LENGTH } from './court.js';
 import { loadCharacters, animateCharacter } from './characters.js';
 import { createBall, BallState } from './ball.js';
 import { setupInput, isMoveKeyDown, getMoveVector } from './input.js';
-import * as InputModule from './input.js';
+import * as Input from './input.js';
 
-// ---------- WebGL support check ----------
+const $ = (id) => document.getElementById(id);
 function hasWebGL() {
-  try {
-    const c = document.createElement('canvas');
-    return !!(window.WebGLRenderingContext && (c.getContext('webgl') || c.getContext('experimental-webgl')));
-  } catch (e) {
-    return false;
-  }
+  try { const c = document.createElement('canvas'); return !!(window.WebGLRenderingContext && c.getContext('webgl')); } catch { return false; }
 }
-if (!hasWebGL()) {
-  document.getElementById('webgl-error').style.display = 'flex';
-  throw new Error('No WebGL');
-}
+if (!hasWebGL()) { $('webgl-error').style.display = 'flex'; throw new Error('WebGL unavailable'); }
 
-// ---------- Renderer / Scene / Camera ----------
-const canvas = document.getElementById('game-canvas');
-const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
-renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
-renderer.setSize(window.innerWidth, window.innerHeight);
+const canvas = $('game-canvas');
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, powerPreference: 'high-performance' });
+renderer.setPixelRatio(Math.min(devicePixelRatio, innerWidth < 800 ? 1.5 : 2));
+renderer.setSize(innerWidth, innerHeight);
 renderer.shadowMap.enabled = true;
 renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 renderer.outputColorSpace = THREE.SRGBColorSpace;
@@ -31,222 +22,170 @@ renderer.outputColorSpace = THREE.SRGBColorSpace;
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x1a1006);
 scene.fog = new THREE.Fog(0x1a1006, 30, 90);
-
-const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 200);
-
-window.addEventListener('resize', () => {
-  camera.aspect = window.innerWidth / window.innerHeight;
-  camera.updateProjectionMatrix();
-  renderer.setSize(window.innerWidth, window.innerHeight);
-});
+const camera = new THREE.PerspectiveCamera(60, innerWidth / innerHeight, 0.1, 200);
+addEventListener('resize', () => { camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix(); renderer.setSize(innerWidth, innerHeight); });
 
 addLighting(scene);
 const { ringMesh, ringWorldPos } = createCourt(scene);
 const ballMesh = createBall(scene);
 const ballState = new BallState();
-
-// ---------- Loading manager ----------
 const manager = new THREE.LoadingManager();
-manager.onProgress = (url, loaded, total) => {
-  const bar = document.getElementById('loadbar');
-  if (bar) bar.style.width = Math.round((loaded / total) * 100) + '%';
-};
-manager.onLoad = () => {
-  const loading = document.getElementById('loading');
-  if (loading) loading.style.display = 'none';
-};
+manager.onProgress = (_url, loaded, total) => { $('loadbar').style.width = `${Math.round(loaded / total * 100)}%`; };
+manager.onLoad = () => { $('loading').style.display = 'none'; };
 
 let playerChar = null, aiChar = null, playerBones = {}, aiBones = {};
-loadCharacters(scene, manager, '/models/player.glb').then((res) => {
-  playerChar = res.playerChar;
-  aiChar = res.aiChar;
-  playerBones = res.playerBones;
-  aiBones = res.aiBones;
+loadCharacters(scene, manager, './models/player.glb').then((result) => {
+  ({ playerChar, aiChar, playerBones, aiBones } = result);
+}).catch(() => {
+  $('loading').innerHTML = '<div>CHARACTER COULD NOT LOAD</div><small>Refresh to try again.</small>';
 });
 
-// ---------- Aim indicator ----------
-const aimIndicator = new THREE.Mesh(
-  new THREE.ConeGeometry(0.18, 0.6, 8),
-  new THREE.MeshStandardMaterial({ color: 0xe8a33d, emissive: 0x552200, emissiveIntensity: 0.5 })
-);
+const aimIndicator = new THREE.Mesh(new THREE.ConeGeometry(0.18, 0.6, 8), new THREE.MeshStandardMaterial({ color: 0xe8a33d, emissive: 0x552200, emissiveIntensity: 0.5 }));
 aimIndicator.rotation.x = Math.PI / 2;
 scene.add(aimIndicator);
 
-// ---------- Game state ----------
-let scorePlayer = 0, scoreAI = 0;
 const TARGET_SCORE = 3;
-let gameOver = false;
-let playerHitCooldown = 0;
-let aiHitCooldown = 0;
-let aiSwingTimer = 0;
-let playerSwingTimer = 0;
-
+const SOLO_SECONDS = 60;
 const HIT_RANGE = 1.7;
-const HIT_UPWARD_MIN = 6.5;
-const HIT_UPWARD_MAX = 9.5;
-const HIT_FORWARD_SPEED = 7.5;
 const PLAYER_SPEED = 6.5;
 const AI_SPEED = 4.2;
+let mode = null, phase = 'menu', scorePlayer = 0, scoreAI = 0, timeLeft = SOLO_SECONDS;
+let playerHitCooldown = 0, aiHitCooldown = 0, playerSwingTimer = 0, aiSwingTimer = 0;
+let lastTouch = 'player', currentAimAngle = 0, countdownToken = 0;
 
-function applyHit(fromPos, angle) {
-  const dirX = Math.sin(angle);
-  const dirZ = Math.cos(angle);
-  const toRing = new THREE.Vector3().subVectors(ringWorldPos, fromPos).normalize();
-  const aimDir = new THREE.Vector3(dirX, 0, dirZ).normalize();
-  const blended = aimDir.multiplyScalar(0.7).add(toRing.multiplyScalar(0.3)).normalize();
+function resetPositions() {
+  ballState.reset();
+  if (playerChar) playerChar.position.set(-3, 0, -8);
+  if (aiChar) playerChar && aiChar.position.set(3, 0, 8);
+}
 
-  ballState.vel.x = blended.x * HIT_FORWARD_SPEED;
-  ballState.vel.z = blended.z * HIT_FORWARD_SPEED;
-  ballState.vel.y = HIT_UPWARD_MIN + Math.random() * (HIT_UPWARD_MAX - HIT_UPWARD_MIN);
-  ballState.heldCooldown = 0.25;
+function updateHUD() {
+  $('score-player').textContent = scorePlayer;
+  $('score-ai').textContent = scoreAI;
+  $('center-value').textContent = mode === 'solo' ? Math.max(0, Math.ceil(timeLeft)) : TARGET_SCORE;
+}
+
+function beginCountdown() {
+  const token = ++countdownToken;
+  phase = 'countdown';
+  $('countdown').style.display = 'flex';
+  let number = 3;
+  $('countdown-value').textContent = number;
+  const step = () => {
+    if (token !== countdownToken) return;
+    number -= 1;
+    if (number > 0) { $('countdown-value').textContent = number; setTimeout(step, 700); }
+    else if (number === 0) { $('countdown-value').textContent = 'PLAY'; setTimeout(step, 600); }
+    else { $('countdown').style.display = 'none'; phase = 'playing'; }
+  };
+  setTimeout(step, 700);
+}
+
+function startGame(selectedMode) {
+  mode = selectedMode;
+  scorePlayer = 0; scoreAI = 0; timeLeft = SOLO_SECONDS;
+  $('menu').style.display = 'none'; $('endscreen').style.display = 'none';
+  $('hud').classList.remove('hidden'); $('hint').classList.remove('hidden');
+  if (matchMedia('(pointer: coarse)').matches) $('touch-controls').classList.remove('hidden');
+  $('rival-score').style.display = mode === 'solo' ? 'none' : '';
+  $('player-label').textContent = mode === 'solo' ? 'Rings' : 'You';
+  $('center-label').textContent = mode === 'solo' ? 'Time' : 'First to';
+  if (aiChar) aiChar.visible = mode === 'versus';
+  updateHUD(); resetPositions(); beginCountdown();
+}
+
+document.querySelectorAll('.mode-btn').forEach((button) => button.addEventListener('click', () => startGame(button.dataset.mode)));
+$('restart-btn').addEventListener('click', () => startGame(mode));
+$('menu-btn').addEventListener('click', () => {
+  ++countdownToken; phase = 'menu'; mode = null;
+  $('endscreen').style.display = 'none'; $('menu').style.display = 'flex'; $('hud').classList.add('hidden');
+  $('hint').classList.add('hidden'); $('touch-controls').classList.add('hidden');
+  if (aiChar) aiChar.visible = true;
+});
+
+function applyHit(fromPos, angle, owner) {
+  const aimed = new THREE.Vector3(Math.sin(angle), 0, Math.cos(angle));
+  const towardRing = new THREE.Vector3().subVectors(ringWorldPos, fromPos).normalize();
+  const direction = aimed.multiplyScalar(0.68).add(towardRing.multiplyScalar(0.32)).normalize();
+  ballState.vel.set(direction.x * 7.8, 7.2 + Math.random() * 2.5, direction.z * 7.8);
+  ballState.heldCooldown = 0.3;
+  lastTouch = owner;
 }
 
 function tryPlayerHit() {
-  if (gameOver || !playerChar || playerHitCooldown > 0) return;
-  const dist = ballState.pos.distanceTo(playerChar.position);
-  if (dist > HIT_RANGE) return;
-  applyHit(playerChar.position, currentAimAngle);
-  playerHitCooldown = 0.45;
-  playerSwingTimer = 0.3;
+  if (phase !== 'playing' || !playerChar || playerHitCooldown > 0 || ballState.pos.distanceTo(playerChar.position) > HIT_RANGE) return;
+  applyHit(playerChar.position, currentAimAngle, 'player'); playerHitCooldown = 0.45; playerSwingTimer = 0.3;
 }
-
-// input.js exports a live `mouseAimAngle` binding; we read it each frame
-// via the namespace import above rather than destructuring a stale copy.
-let currentAimAngle = 0;
-
-setupInput(canvas, camera, () => (playerChar ? playerChar.position : null), tryPlayerHit);
+setupInput(canvas, camera, () => playerChar?.position, tryPlayerHit);
 
 function registerScore() {
-  if (!playerChar || !aiChar) return;
-  const dPlayer = playerChar.position.distanceTo(ballState.pos);
-  const dAI = aiChar.position.distanceTo(ballState.pos);
-  if (dPlayer < dAI) scorePlayer++; else scoreAI++;
+  if (mode === 'solo' || lastTouch === 'player') scorePlayer += 1; else scoreAI += 1;
+  updateHUD(); ballState.heldCooldown = 1.5; ballState.reset();
+  if (mode === 'versus' && (scorePlayer >= TARGET_SCORE || scoreAI >= TARGET_SCORE)) finishGame();
+}
 
-  const spEl = document.getElementById('score-player');
-  const saEl = document.getElementById('score-ai');
-  if (spEl) spEl.textContent = scorePlayer;
-  if (saEl) saEl.textContent = scoreAI;
-
-  ballState.heldCooldown = 1.5;
-  ballState.reset();
-
-  if (scorePlayer >= TARGET_SCORE || scoreAI >= TARGET_SCORE) {
-    endGame(scorePlayer > scoreAI);
+function finishGame() {
+  phase = 'ended';
+  $('endscreen').style.display = 'flex';
+  if (mode === 'solo') {
+    $('end-mode').textContent = 'SOLO CHALLENGE COMPLETE'; $('end-title').textContent = `${scorePlayer} RINGS`;
+    $('end-sub').textContent = scorePlayer ? 'Your name is carved into the sun-stone.' : 'The ring awaits your next challenge.';
+  } else {
+    const won = scorePlayer > scoreAI;
+    $('end-mode').textContent = '1V1 MATCH COMPLETE'; $('end-title').textContent = won ? 'VICTORY' : 'THE RIVAL WINS';
+    $('end-sub').textContent = `${scorePlayer} — ${scoreAI}`;
   }
 }
 
-function endGame(playerWon) {
-  gameOver = true;
-  const el = document.getElementById('endscreen');
-  const title = document.getElementById('end-title');
-  const sub = document.getElementById('end-sub');
-  if (title) title.textContent = playerWon ? 'VICTORY' : 'THE RIVAL WINS';
-  if (sub) sub.textContent = playerWon
-    ? 'You carried the sun through the stone ring.'
-    : 'The rival claimed the sacred court this time.';
-  if (el) el.style.display = 'flex';
-}
-
-const restartBtn = document.getElementById('restart-btn');
-if (restartBtn) {
-  restartBtn.addEventListener('click', () => {
-    scorePlayer = 0; scoreAI = 0;
-    document.getElementById('score-player').textContent = 0;
-    document.getElementById('score-ai').textContent = 0;
-    gameOver = false;
-    document.getElementById('endscreen').style.display = 'none';
-    ballState.reset();
-    if (playerChar) playerChar.position.set(-3, 0, -8);
-    if (aiChar) aiChar.position.set(3, 0, 8);
-  });
-}
-
 function updatePlayer(dt) {
-  if (!playerChar || gameOver) return;
+  if (!playerChar || phase !== 'playing') return;
   const { mx, mz, moving } = getMoveVector();
   if (moving) {
-    playerChar.position.x += mx * PLAYER_SPEED * dt;
-    playerChar.position.z += mz * PLAYER_SPEED * dt;
-    playerChar.position.x = THREE.MathUtils.clamp(playerChar.position.x, -COURT_WIDTH / 2 + 1.2, COURT_WIDTH / 2 - 1.2);
-    playerChar.position.z = THREE.MathUtils.clamp(playerChar.position.z, -COURT_LENGTH / 2 + 1.5, COURT_LENGTH / 2 - 1.5);
-    const moveAngle = Math.atan2(mx, mz);
-    playerChar.rotation.y = THREE.MathUtils.lerp(playerChar.rotation.y, moveAngle, 0.25);
+    playerChar.position.x = THREE.MathUtils.clamp(playerChar.position.x + mx * PLAYER_SPEED * dt, -COURT_WIDTH / 2 + 1.2, COURT_WIDTH / 2 - 1.2);
+    playerChar.position.z = THREE.MathUtils.clamp(playerChar.position.z + mz * PLAYER_SPEED * dt, -COURT_LENGTH / 2 + 1.5, COURT_LENGTH / 2 - 1.5);
+    playerChar.rotation.y = THREE.MathUtils.lerp(playerChar.rotation.y, Math.atan2(mx, mz), 0.25);
   }
   playerHitCooldown = Math.max(0, playerHitCooldown - dt);
 }
 
 function updateAI(dt) {
-  if (!aiChar || gameOver) return;
+  if (!aiChar || mode !== 'versus' || phase !== 'playing') return;
   aiHitCooldown = Math.max(0, aiHitCooldown - dt);
-
-  const toBall = new THREE.Vector3().subVectors(ballState.pos, aiChar.position);
-  toBall.y = 0;
-  const dist = toBall.length();
-
-  if (dist > HIT_RANGE * 0.9) {
+  const toBall = new THREE.Vector3().subVectors(ballState.pos, aiChar.position); toBall.y = 0;
+  if (toBall.length() > HIT_RANGE * 0.9) {
     toBall.normalize();
-    aiChar.position.x += toBall.x * AI_SPEED * dt;
-    aiChar.position.z += toBall.z * AI_SPEED * dt;
-    aiChar.position.x = THREE.MathUtils.clamp(aiChar.position.x, -COURT_WIDTH / 2 + 1.2, COURT_WIDTH / 2 - 1.2);
-    aiChar.position.z = THREE.MathUtils.clamp(aiChar.position.z, -COURT_LENGTH / 2 + 1.5, COURT_LENGTH / 2 - 1.5);
+    aiChar.position.x = THREE.MathUtils.clamp(aiChar.position.x + toBall.x * AI_SPEED * dt, -COURT_WIDTH / 2 + 1.2, COURT_WIDTH / 2 - 1.2);
+    aiChar.position.z = THREE.MathUtils.clamp(aiChar.position.z + toBall.z * AI_SPEED * dt, -COURT_LENGTH / 2 + 1.5, COURT_LENGTH / 2 - 1.5);
     aiChar.rotation.y = Math.atan2(toBall.x, toBall.z);
   } else if (aiHitCooldown <= 0 && ballState.pos.y < 3.2) {
-    const angle = Math.atan2(aiChar.position.x - ringWorldPos.x, aiChar.position.z - ringWorldPos.z) + Math.PI;
-    const jitter = (Math.random() - 0.5) * 0.4;
-    applyHit(aiChar.position, angle + jitter);
-    aiHitCooldown = 0.7 + Math.random() * 0.5;
-    aiSwingTimer = 0.3;
+    const angle = Math.atan2(ringWorldPos.x - aiChar.position.x, ringWorldPos.z - aiChar.position.z) + (Math.random() - 0.5) * 0.45;
+    applyHit(aiChar.position, angle, 'ai'); aiHitCooldown = 0.8 + Math.random() * 0.5; aiSwingTimer = 0.3;
   }
 }
 
-function updateAimIndicator() {
-  if (!playerChar) return;
-  currentAimAngle = InputModule.mouseAimAngle;
-  const r = 1.3;
-  aimIndicator.position.set(
-    playerChar.position.x + Math.sin(currentAimAngle) * r,
-    1.1,
-    playerChar.position.z + Math.cos(currentAimAngle) * r
-  );
-  aimIndicator.rotation.y = currentAimAngle;
-}
-
 const camOffset = new THREE.Vector3(0, 7, 11);
-function updateCamera(dt) {
-  if (!playerChar) return;
-  const desired = new THREE.Vector3().copy(playerChar.position).add(camOffset);
-  camera.position.lerp(desired, 1 - Math.pow(0.001, dt));
-  const lookTarget = new THREE.Vector3().copy(playerChar.position).add(new THREE.Vector3(0, 1.4, 0));
-  camera.lookAt(lookTarget);
-}
-
-// ---------- Main loop ----------
 const clock = new THREE.Clock();
 let animTime = 0;
-
 function tick() {
   requestAnimationFrame(tick);
-  const dt = Math.min(clock.getDelta(), 0.05);
-  animTime += dt;
-
-  updatePlayer(dt);
-  updateAI(dt);
-
-  const scored = ballState.update(dt, ringWorldPos);
+  const dt = Math.min(clock.getDelta(), 0.05); animTime += dt;
+  if (phase === 'playing') {
+    if (mode === 'solo') { timeLeft -= dt; updateHUD(); if (timeLeft <= 0) finishGame(); }
+    updatePlayer(dt); updateAI(dt);
+    if (ballState.update(dt, ringWorldPos)) registerScore();
+  }
   ballMesh.position.copy(ballState.pos);
-  if (scored) registerScore();
-
-  updateCamera(dt);
-  updateAimIndicator();
-
-  if (playerSwingTimer > 0) playerSwingTimer -= dt;
-  if (aiSwingTimer > 0) aiSwingTimer -= dt;
-
+  if (playerChar) {
+    currentAimAngle = Input.mouseAimAngle;
+    aimIndicator.position.set(playerChar.position.x + Math.sin(currentAimAngle) * 1.3, 1.1, playerChar.position.z + Math.cos(currentAimAngle) * 1.3);
+    aimIndicator.rotation.y = currentAimAngle;
+    camera.position.lerp(new THREE.Vector3().copy(playerChar.position).add(camOffset), 1 - Math.pow(0.001, dt));
+    camera.lookAt(new THREE.Vector3(playerChar.position.x, 1.4, playerChar.position.z));
+  }
+  playerSwingTimer = Math.max(0, playerSwingTimer - dt); aiSwingTimer = Math.max(0, aiSwingTimer - dt);
   animateCharacter(playerBones, isMoveKeyDown(), playerSwingTimer, dt, animTime);
-  animateCharacter(aiBones, true, aiSwingTimer, dt, animTime);
-
+  animateCharacter(aiBones, mode === 'versus', aiSwingTimer, dt, animTime);
   ringMesh.rotation.z += dt * 0.2;
-
   renderer.render(scene, camera);
 }
 tick();
